@@ -1,6 +1,6 @@
 use core::fmt;
 
-use memchr::{memchr2, memchr3};
+use memchr::{memchr, memchr2, memchr3};
 
 use crate::Formatter;
 
@@ -102,8 +102,26 @@ const TEXT_ESCAPES: EscapeTable = escape_table([(b'&', "&amp;"), (b'<', "&lt;"),
 
 const ATTRIBUTE_VALUE_ESCAPES: EscapeTable = escape_table([(b'&', "&amp;"), (b'"', "&quot;")]);
 
-const COMMENT_ESCAPES: EscapeTable =
-    escape_table([(b'&', "&amp;"), (b'>', "&gt;"), (b'"', "&quot;")]);
+// `<` is escaped here even though a comment may hold one, because the runtime
+// decodes a comment's payload by parsing it as HTML and taking `textContent`.
+// A surviving `<` starts an element there, and the text comes back reordered
+// or short -- which for a signal marker means invalid JSON and a scope that
+// never hydrates.
+const COMMENT_ESCAPES: EscapeTable = escape_table([
+    (b'&', "&amp;"),
+    (b'<', "&lt;"),
+    (b'>', "&gt;"),
+    (b'"', "&quot;"),
+]);
+
+/// `memchr` stops at three needles and a comment payload has four.
+#[inline]
+fn memchr4(a: u8, b: u8, c: u8, d: u8, haystack: &[u8]) -> Option<usize> {
+    match (memchr3(a, b, c, haystack), memchr(d, haystack)) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (found, None) | (None, found) => found,
+    }
+}
 
 /// Generates a write method specialized for one escaping context: a dedicated
 /// search for its escapable bytes and a dedicated lookup table, with no
@@ -216,7 +234,7 @@ impl HtmlWriter<'_, '_> {
     impl_write_escaped!(
         /// Writes `s` escaped for a comment payload.
         write_comment_escaped,
-        memchr3(b'&', b'>', b'"'),
+        memchr4(b'&', b'<', b'>', b'"'),
         COMMENT_ESCAPES
     );
 
@@ -412,7 +430,22 @@ mod tests {
 
     #[test]
     fn comment_leaves_lt_and_apostrophe() {
-        assert_eq!(write(HtmlContext::Comment, "<!-- 'a'"), "<!-- 'a'");
+        // `<` is escaped: the runtime decodes a comment payload by parsing it
+        // as HTML, so one left alone would be read as the start of an element.
+        assert_eq!(write(HtmlContext::Comment, "<!-- 'a'"), "&lt;!-- 'a'");
+    }
+
+    /// The runtime reads a comment back by parsing its payload as HTML and
+    /// taking `textContent`. Anything that can open an element there returns
+    /// reordered or truncated -- which for a signal marker is invalid JSON and
+    /// a scope that silently never hydrates.
+    #[test]
+    fn nothing_in_a_comment_payload_can_open_an_element() {
+        let payload = r#"{"t":"signal","v":"<script>alert("x")</script>"}"#;
+
+        let written = write(HtmlContext::Comment, payload);
+
+        assert!(!written.contains('<'), "written was: {written}");
     }
 
     #[test]
