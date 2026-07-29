@@ -1,6 +1,6 @@
 use core::fmt;
 
-use memchr::{memchr2, memchr3};
+use memchr::{memchr, memchr2, memchr3};
 
 use crate::Formatter;
 
@@ -15,7 +15,7 @@ use crate::Formatter;
 /// | `Unescaped`      | -       | -      | -      | -        | -            |
 /// | `Text`           | `&amp;` | `&lt;` | `&gt;` | -        | -            |
 /// | `AttributeValue` | `&amp;` | -      | -      | `&quot;` | -            |
-/// | `Comment`        | `&amp;` | -      | `&gt;` | `&quot;` | -            |
+/// | `Comment`        | `&amp;` | `&lt;` | `&gt;` | `&quot;` | -            |
 /// | `AttributeKey`   | -       | panic  | panic  | panic    | see below    |
 /// | `ElementName`    | -       | panic  | panic  | panic    | see below    |
 ///
@@ -34,8 +34,10 @@ pub enum HtmlContext {
     /// A double-quoted attribute value.
     AttributeValue,
     /// A payload inside an HTML comment. Escaping prevents the payload
-    /// from closing the comment. Its consumer must decode character
-    /// references because the browser does not decode comment contents.
+    /// from closing the comment, and prevents it from opening an element
+    /// in the consumer that reads it back. Its consumer must decode
+    /// character references itself because the browser does not decode
+    /// comment contents.
     Comment,
     /// An attribute name, validated as an identifier rather than escaped.
     AttributeKey,
@@ -95,8 +97,30 @@ const TEXT_ESCAPES: EscapeTable = escape_table([(b'&', "&amp;"), (b'<', "&lt;"),
 
 const ATTRIBUTE_VALUE_ESCAPES: EscapeTable = escape_table([(b'&', "&amp;"), (b'"', "&quot;")]);
 
-const COMMENT_ESCAPES: EscapeTable =
-    escape_table([(b'&', "&amp;"), (b'>', "&gt;"), (b'"', "&quot;")]);
+// `<` is escaped here even though an HTML comment may legally hold one,
+// because the runtime decodes a comment's payload by parsing it as HTML and
+// taking `textContent`. A surviving `<` opens an element there, and since
+// every `>` is escaped the tag never closes -- so the rest of the payload is
+// swallowed as a tag name, which for a signal marker means `JSON.parse`
+// throws and the scope silently never hydrates.
+const COMMENT_ESCAPES: EscapeTable = escape_table([
+    (b'&', "&amp;"),
+    (b'<', "&lt;"),
+    (b'>', "&gt;"),
+    (b'"', "&quot;"),
+]);
+
+/// `memchr` stops at three needles and a comment payload has four.
+#[inline]
+fn memchr4(needle1: u8, needle2: u8, needle3: u8, needle4: u8, haystack: &[u8]) -> Option<usize> {
+    match (
+        memchr3(needle1, needle2, needle3, haystack),
+        memchr(needle4, haystack),
+    ) {
+        (Some(in_three), Some(in_fourth)) => Some(in_three.min(in_fourth)),
+        (found, None) | (None, found) => found,
+    }
+}
 
 /// Generates a write method specialized for one escaping context: a dedicated
 /// search for its escapable bytes and a dedicated lookup table, with no
@@ -211,7 +235,7 @@ impl HtmlWriter<'_, '_> {
     impl_write_escaped!(
         /// Writes `s` escaped for a comment payload.
         write_comment_escaped,
-        memchr3(b'&', b'>', b'"'),
+        memchr4(b'&', b'<', b'>', b'"'),
         COMMENT_ESCAPES
     );
 
@@ -408,8 +432,23 @@ mod tests {
     }
 
     #[test]
-    fn comment_leaves_lt_and_apostrophe() {
-        assert_eq!(write(HtmlContext::Comment, "<!-- 'a'"), "<!-- 'a'");
+    fn comment_escapes_lt_and_leaves_apostrophe() {
+        // `<` is escaped: the runtime decodes a comment payload by parsing it
+        // as HTML, so one left alone would be read as the start of an element.
+        assert_eq!(write(HtmlContext::Comment, "<!-- 'a'"), "&lt;!-- 'a'");
+    }
+
+    /// The runtime reads a comment back by parsing its payload as HTML and
+    /// taking `textContent`. Anything that opens an element there swallows the
+    /// rest of the payload -- which for a signal marker is invalid JSON and a
+    /// scope that silently never hydrates.
+    #[test]
+    fn nothing_in_a_comment_payload_can_open_an_element() {
+        let payload = r#"{"t":"signal","v":"<script>alert("x")</script>"}"#;
+
+        let written = write(HtmlContext::Comment, payload);
+
+        assert!(!written.contains('<'), "written was: {written}");
     }
 
     #[test]
