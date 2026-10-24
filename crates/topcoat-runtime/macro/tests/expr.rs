@@ -282,7 +282,7 @@ async fn a_captured_value_cannot_break_out_of_its_marker_comment() {
 
     // The capture reaches the client as a hydrated JSON value.
     assert!(
-        html.contains(r"cx.hydrate(&quot;--&gt;\&quot;&lt;&amp;&quot;)"),
+        html.contains(r"cx.hydrate(&quot;--&gt;\&quot;<&amp;&quot;)"),
         "{html}"
     );
     // The rendered snapshot of the value is escaped for text.

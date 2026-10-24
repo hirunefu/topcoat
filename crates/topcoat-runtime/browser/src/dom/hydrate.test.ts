@@ -25,23 +25,29 @@ it("parses signal values without resolving their references", () => {
 });
 
 it("parses a signal value that contains markup", () => {
-	// The server escapes `<` in a comment payload because this decode parses
-	// the payload as HTML. A `<` left alone opens an element that swallows the
-	// rest of the payload, the quotes the JSON needs included -- so the value
-	// cannot be recovered on this side, which is why it is escaped on the other.
-	const escaped =
+	// The server leaves `<` unescaped in comment payloads, so it must not be
+	// read as the start of an element.
+	const marker = document.createComment(
 		"::topcoat::signal({&quot;t&quot;:&quot;signal&quot;,&quot;id&quot;:&quot;b&quot;," +
-		"&quot;v&quot;:&quot;&lt;script&gt;alert(1)&lt;/script&gt;&quot;})";
+			"&quot;v&quot;:&quot;<script&gt;alert(1)</script&gt; &amp;lt;&quot;})",
+	);
 
-	expect(parseComment(document.createComment(escaped))).toEqual({
+	expect(parseComment(marker)).toEqual({
 		kind: "signal",
 		id: "b",
-		value: "<script>alert(1)</script>",
+		value: "<script>alert(1)</script> &lt;",
 	});
+});
 
-	expect(() =>
-		parseComment(document.createComment(escaped.replaceAll("&lt;", "<"))),
-	).toThrow();
+it("parses an expression that contains markup", () => {
+	const marker = document.createComment(
+		'::topcoat::expr::start("a<b &amp;&amp; c == &quot;<p&gt;&quot;")',
+	);
+
+	expect(parseComment(marker)).toEqual({
+		kind: "expr-start",
+		js: 'a<b && c == "<p>"',
+	});
 });
 
 it("parses a connection requirement", () => {
